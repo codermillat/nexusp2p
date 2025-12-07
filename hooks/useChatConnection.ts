@@ -209,42 +209,47 @@ export const useChatConnection = () => {
   }, []);
 
   // Initialize PeerJS with dynamic TURN credentials
-  const initPeer = useCallback(async () => {
-    return new Promise<string>(async (resolve, reject) => {
-      if (peerRef.current && !peerRef.current.destroyed && peerRef.current.id) {
-        resolve(peerRef.current.id);
-        return;
-      }
+  const initPeer = useCallback(async (): Promise<string> => {
+    // If already initialized, return existing ID
+    if (peerRef.current && !peerRef.current.destroyed && peerRef.current.id) {
+      console.log('♻️ Reusing existing peer:', peerRef.current.id);
+      return peerRef.current.id;
+    }
 
-      if (peerRef.current) {
-        try {
-          peerRef.current.destroy();
-        } catch (e) { }
-        peerRef.current = null;
-      }
+    // Cleanup old peer if exists
+    if (peerRef.current) {
+      try {
+        peerRef.current.destroy();
+      } catch (e) { }
+      peerRef.current = null;
+    }
 
+    // Fetch TURN credentials FIRST (outside Promise constructor)
+    let iceConfig;
+    try {
+      iceConfig = await getIceConfig();
+      console.log('🔐 Using dynamic TURN credentials');
+    } catch (e) {
+      console.warn('⚠️ Using fallback ICE config:', e);
+      iceConfig = FALLBACK_ICE_CONFIG;
+    }
+
+    const peerConfig = {
+      config: iceConfig,
+      debug: DEBUG_MODE ? 2 : 0,
+    };
+
+    // Now create the peer in a Promise
+    return new Promise<string>((resolve, reject) => {
       const initTimeout = setTimeout(() => {
+        console.error('⏰ Peer initialization timed out');
         reject(new Error('Connection timed out. Check your network.'));
       }, PEER_INIT_TIMEOUT);
-
-      // Fetch dynamic TURN credentials
-      let iceConfig;
-      try {
-        iceConfig = await getIceConfig();
-        console.log('🔐 Using dynamic TURN credentials');
-      } catch (e) {
-        console.warn('⚠️ Using fallback ICE config');
-        iceConfig = FALLBACK_ICE_CONFIG;
-      }
-
-      const peerConfig = {
-        config: iceConfig,
-        debug: DEBUG_MODE ? 2 : 0,
-      };
 
       let peer: Peer;
 
       try {
+        console.log('🔄 Creating PeerJS instance...');
         peer = new Peer(peerConfig);
       } catch (err) {
         clearTimeout(initTimeout);
