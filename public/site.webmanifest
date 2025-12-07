@@ -1,0 +1,30 @@
+{
+    "name": "NexusP2P",
+    "short_name": "NexusP2P",
+    "description": "Secure, serverless, decentralized video chat connecting people directly via WebRTC.",
+    "start_url": "/",
+    "display": "standalone",
+    "background_color": "#020617",
+    "theme_color": "#4f46e5",
+    "orientation": "portrait-primary",
+    "icons": [
+        {
+            "src": "/favicon.png",
+            "sizes": "512x512",
+            "type": "image/png",
+            "purpose": "any"
+        },
+        {
+            "src": "/favicon.png",
+            "sizes": "512x512",
+            "type": "image/png",
+            "purpose": "maskable"
+        }
+    ],
+    "categories": [
+        "social",
+        "communication"
+    ],
+    "lang": "en",
+    "dir": "ltr"
+}

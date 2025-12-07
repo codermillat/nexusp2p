@@ -1,0 +1,10 @@
+# Robots.txt for NexusP2P
+
+User-agent: *
+Allow: /
+
+# Sitemap
+Sitemap: https://nexusp2p.vercel.app/sitemap.xml
+
+# Crawl-delay (optional, respectful crawling)
+Crawl-delay: 1
