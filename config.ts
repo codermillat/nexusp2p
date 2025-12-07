@@ -12,7 +12,7 @@
 // Alternatives: broker.emqx.io, test.mosquitto.org
 export const MQTT_CONFIG = {
     brokerUrl: 'wss://broker.hivemq.com:8884/mqtt',
-    lobbyTopic: 'nexusp2p-global-lobby-v5',
+    lobbyTopic: 'nexusp2p-global-lobby-v6',
     reconnectAttempts: 3,
     heartbeatInterval: 1500, // ms between presence signals
 };
@@ -21,7 +21,7 @@ export const MQTT_CONFIG = {
 // WEBRTC / ICE CONFIGURATION
 // =============================================================================
 // STUN servers help discover your public IP (always free, unlimited)
-// TURN servers relay media when direct P2P fails (free tier available)
+// TURN servers relay media when direct P2P fails (required for symmetric NAT)
 export const ICE_CONFIG = {
     iceServers: [
         // === FREE STUN SERVERS (Unlimited) ===
@@ -31,12 +31,9 @@ export const ICE_CONFIG = {
         { urls: 'stun:stun3.l.google.com:19302' },
         { urls: 'stun:stun4.l.google.com:19302' },
         { urls: 'stun:global.stun.twilio.com:3478' },
-        { urls: 'stun:stun.cloudflare.com:3478' },
-        { urls: 'stun:stun.services.mozilla.com:3478' },
 
         // === FREE TURN SERVERS ===
-        // OpenRelay by Metered (https://www.metered.ca/tools/openrelay/)
-        // Free tier: ~500GB/month, works globally
+        // Metered OpenRelay - Free public TURN
         {
             urls: 'turn:openrelay.metered.ca:80',
             username: 'openrelayproject',
@@ -48,19 +45,42 @@ export const ICE_CONFIG = {
             credential: 'openrelayproject',
         },
         {
+            urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+            username: 'openrelayproject',
+            credential: 'openrelayproject',
+        },
+        {
             urls: 'turns:openrelay.metered.ca:443',
             username: 'openrelayproject',
             credential: 'openrelayproject',
         },
+
+        // Relay Metered - Alternative free TURN
+        {
+            urls: 'turn:relay.metered.ca:80',
+            username: 'e13b9bfeda7b8ce41de7b8e5',
+            credential: 'SWKdtuV0SkALW9YW',
+        },
+        {
+            urls: 'turn:relay.metered.ca:443',
+            username: 'e13b9bfeda7b8ce41de7b8e5',
+            credential: 'SWKdtuV0SkALW9YW',
+        },
+        {
+            urls: 'turn:relay.metered.ca:443?transport=tcp',
+            username: 'e13b9bfeda7b8ce41de7b8e5',
+            credential: 'SWKdtuV0SkALW9YW',
+        },
     ],
 
-    // 'all' = Try direct P2P first (free), fallback to TURN relay
-    // 'relay' = Always use TURN (for testing relay)
+    // ICE transport policy:
+    // 'all' = Try direct P2P first (fastest), fallback to TURN relay
+    // 'relay' = Force TURN relay (use for testing or strict NAT)
     iceTransportPolicy: 'all' as const,
 
     bundlePolicy: 'max-bundle' as const,
     rtcpMuxPolicy: 'require' as const,
-    iceCandidatePoolSize: 5,
+    iceCandidatePoolSize: 10,
 };
 
 // =============================================================================
@@ -74,16 +94,16 @@ export const PEER_CONFIG = {
     // path: '/peerjs',
     // secure: true,
     config: ICE_CONFIG,
-    debug: 0, // 0=off, 1=errors, 2=warnings, 3=all
+    debug: 0, // 0=off, 1=errors, 2=warnings, 3=all (set to 3 for debugging)
 };
 
 // =============================================================================
-// CONNECTION TIMEOUTS
+// CONNECTION TIMEOUTS (increased for cross-network)
 // =============================================================================
 export const TIMEOUT_CONFIG = {
-    peerInit: 20000,        // Time to initialize PeerJS connection
-    streamHandshake: 20000, // Time to receive remote stream after call
-    connectionAttempt: 12000, // Time before skipping to next peer
+    peerInit: 30000,        // Time to initialize PeerJS connection
+    streamHandshake: 30000, // Time to receive remote stream after call
+    connectionAttempt: 20000, // Time before skipping to next peer
 };
 
 // =============================================================================
@@ -121,6 +141,12 @@ export const APP_CONFIG = {
     version: '1.0.0',
     url: 'https://nexusp2p.vercel.app',
 };
+
+// =============================================================================
+// DEBUG MODE
+// =============================================================================
+// Set to true to see ICE connection states in console
+export const DEBUG_MODE = true;
 
 // =============================================================================
 // SELF-HOSTED TURN SERVER EXAMPLE

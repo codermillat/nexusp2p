@@ -7,7 +7,8 @@ import {
   PEER_CONFIG,
   TIMEOUT_CONFIG,
   MEDIA_CONFIG,
-  CHAT_CONFIG
+  CHAT_CONFIG,
+  DEBUG_MODE
 } from '../config';
 
 // Destructure config values
@@ -333,9 +334,63 @@ export const useChatConnection = () => {
       clearTimeout(streamTimeoutRef.current);
     }
 
+    // Access the underlying RTCPeerConnection for ICE monitoring
+    const peerConnection = (call as any).peerConnection as RTCPeerConnection | undefined;
+
+    if (peerConnection && DEBUG_MODE) {
+      console.log('📡 ICE Connection monitoring enabled');
+
+      // Monitor ICE connection state
+      peerConnection.oniceconnectionstatechange = () => {
+        console.log('🔗 ICE Connection State:', peerConnection.iceConnectionState);
+
+        if (peerConnection.iceConnectionState === 'failed') {
+          console.error('❌ ICE Connection Failed - TURN server may be required');
+          setError('Connection failed. Trying relay...');
+        }
+
+        if (peerConnection.iceConnectionState === 'disconnected') {
+          console.log('⚠️ ICE Disconnected - attempting recovery');
+        }
+
+        if (peerConnection.iceConnectionState === 'connected') {
+          console.log('✅ ICE Connected successfully');
+        }
+      };
+
+      // Monitor ICE gathering state
+      peerConnection.onicegatheringstatechange = () => {
+        console.log('📥 ICE Gathering State:', peerConnection.iceGatheringState);
+      };
+
+      // Monitor ICE candidates
+      peerConnection.onicecandidate = (event) => {
+        if (event.candidate) {
+          const candidateType = event.candidate.type; // 'host', 'srflx', 'relay'
+          console.log(`🎯 ICE Candidate: ${candidateType}`, event.candidate.address || '');
+
+          if (candidateType === 'relay') {
+            console.log('✅ TURN relay candidate found - cross-network should work');
+          }
+        }
+      };
+
+      // Monitor signaling state
+      peerConnection.onsignalingstatechange = () => {
+        console.log('📶 Signaling State:', peerConnection.signalingState);
+      };
+    }
+
     streamTimeoutRef.current = setTimeout(() => {
       if (statusRef.current === ConnectionStatus.CONNECTING) {
         console.log("Stream handshake timed out.");
+
+        // Log ICE state on timeout for debugging
+        if (peerConnection && DEBUG_MODE) {
+          console.log('⏰ Timeout ICE State:', peerConnection.iceConnectionState);
+          console.log('⏰ Timeout Gathering State:', peerConnection.iceGatheringState);
+        }
+
         call.close();
         if (isSearchingRef.current || statusRef.current === ConnectionStatus.CONNECTING) {
           handleRemoteDisconnect(true);
@@ -344,7 +399,7 @@ export const useChatConnection = () => {
     }, STREAM_HANDSHAKE_TIMEOUT);
 
     call.on('stream', (stream) => {
-      console.log("Received remote stream");
+      console.log("✅ Received remote stream");
       if (streamTimeoutRef.current) {
         clearTimeout(streamTimeoutRef.current);
         streamTimeoutRef.current = null;
