@@ -5,12 +5,12 @@ import { ConnectionStatus, ChatMessage } from '../types';
 
 // Use a public reliable broker with WSS support
 const MQTT_BROKER_URL = 'wss://broker.hivemq.com:8884/mqtt';
-const TOPIC_LOBBY = 'nexusp2p-global-lobby-v4';
+const TOPIC_LOBBY = 'nexusp2p-global-lobby-v5';
 
 // Connection timeouts (in ms)
-const PEER_INIT_TIMEOUT = 15000;
-const STREAM_HANDSHAKE_TIMEOUT = 15000;
-const CONNECTION_ATTEMPT_TIMEOUT = 8000;
+const PEER_INIT_TIMEOUT = 20000;
+const STREAM_HANDSHAKE_TIMEOUT = 20000;
+const CONNECTION_ATTEMPT_TIMEOUT = 12000;
 const MQTT_RECONNECT_ATTEMPTS = 3;
 
 // Free public STUN servers are essential for P2P connections to work 
@@ -47,7 +47,7 @@ export const useChatConnection = () => {
   const [error, setError] = useState<string | null>(null);
   const [isInitializing, setIsInitializing] = useState(false);
 
-  // Media States
+  // Media States - now start with camera/mic ON by default
   const [isVideoEnabled, setIsVideoEnabled] = useState(true);
   const [isAudioEnabled, setIsAudioEnabled] = useState(true);
   const [isRemoteAudioEnabled, setIsRemoteAudioEnabled] = useState(true);
@@ -65,10 +65,16 @@ export const useChatConnection = () => {
   const myPeerIdRef = useRef<string | null>(null);
   const heartbeatIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const connectionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const streamTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const ignoreRemoteIdsRef = useRef<Set<string>>(new Set());
   const pingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const statusRef = useRef<ConnectionStatus>(ConnectionStatus.IDLE);
   const mqttReconnectAttempts = useRef(0);
+  const isSearchingRef = useRef(false);
+
+  // Track desired video/audio state for when we have to re-apply it
+  const desiredVideoEnabledRef = useRef(true);
+  const desiredAudioEnabledRef = useRef(true);
 
   // Keep statusRef in sync with status state
   useEffect(() => {
@@ -93,21 +99,26 @@ export const useChatConnection = () => {
       clearTimeout(connectionTimeoutRef.current);
       connectionTimeoutRef.current = null;
     }
+    if (streamTimeoutRef.current) {
+      clearTimeout(streamTimeoutRef.current);
+      streamTimeoutRef.current = null;
+    }
     if (pingIntervalRef.current) {
       clearInterval(pingIntervalRef.current);
       pingIntervalRef.current = null;
     }
   }, []);
 
-  // 1. Initialize Local Media with enhanced error handling
-  const initLocalStream = useCallback(async () => {
-    if (localStreamRef.current) return localStreamRef.current;
+  // Initialize media WITHOUT starting search - allows user to preview/adjust before searching
+  const initializeMedia = useCallback(async () => {
+    if (localStreamRef.current) {
+      return localStreamRef.current;
+    }
 
     // Check browser support first
     const browserCheck = checkBrowserSupport();
     if (!browserCheck.supported) {
       setError(browserCheck.error || 'Browser not supported');
-      setStatus(ConnectionStatus.ERROR);
       return null;
     }
 
@@ -126,16 +137,26 @@ export const useChatConnection = () => {
           autoGainControl: true
         }
       });
+
       setLocalStream(stream);
       localStreamRef.current = stream;
-      setIsVideoEnabled(true);
-      setIsAudioEnabled(true);
+
+      // Apply desired media states
+      stream.getVideoTracks().forEach((track) => {
+        track.enabled = desiredVideoEnabledRef.current;
+      });
+      stream.getAudioTracks().forEach((track) => {
+        track.enabled = desiredAudioEnabledRef.current;
+      });
+
+      setIsVideoEnabled(desiredVideoEnabledRef.current);
+      setIsAudioEnabled(desiredAudioEnabledRef.current);
       setError(null);
+
       return stream;
     } catch (err: unknown) {
       console.error("Failed to get media", err);
 
-      // Provide specific error messages based on error type
       let errorMessage = "Could not access camera/microphone.";
 
       if (err instanceof Error) {
@@ -147,33 +168,36 @@ export const useChatConnection = () => {
           errorMessage = "Camera/microphone is already in use by another application.";
         } else if (err.name === 'OverconstrainedError') {
           errorMessage = "Camera does not meet the required specifications.";
-        } else if (err.name === 'TypeError') {
-          errorMessage = "Invalid media constraints specified.";
         }
       }
 
       setError(errorMessage);
-      setStatus(ConnectionStatus.ERROR);
       return null;
     } finally {
       setIsInitializing(false);
     }
   }, []);
 
+  // Toggle video - can be used before or during a call
   const toggleVideo = useCallback(() => {
+    desiredVideoEnabledRef.current = !desiredVideoEnabledRef.current;
+    setIsVideoEnabled(desiredVideoEnabledRef.current);
+
     if (localStreamRef.current) {
       localStreamRef.current.getVideoTracks().forEach((track) => {
-        track.enabled = !track.enabled;
-        setIsVideoEnabled(track.enabled);
+        track.enabled = desiredVideoEnabledRef.current;
       });
     }
   }, []);
 
+  // Toggle audio - can be used before or during a call
   const toggleAudio = useCallback(() => {
+    desiredAudioEnabledRef.current = !desiredAudioEnabledRef.current;
+    setIsAudioEnabled(desiredAudioEnabledRef.current);
+
     if (localStreamRef.current) {
       localStreamRef.current.getAudioTracks().forEach((track) => {
-        track.enabled = !track.enabled;
-        setIsAudioEnabled(track.enabled);
+        track.enabled = desiredAudioEnabledRef.current;
       });
     }
   }, []);
@@ -185,13 +209,19 @@ export const useChatConnection = () => {
   // 2. Initialize PeerJS with proper error handling and timeout
   const initPeer = useCallback(() => {
     return new Promise<string>((resolve, reject) => {
-      if (peerRef.current && !peerRef.current.destroyed) {
-        if (peerRef.current.id) {
-          resolve(peerRef.current.id);
-        } else {
-          reject(new Error('Peer exists but has no ID'));
-        }
+      if (peerRef.current && !peerRef.current.destroyed && peerRef.current.id) {
+        resolve(peerRef.current.id);
         return;
+      }
+
+      // Cleanup any existing peer
+      if (peerRef.current) {
+        try {
+          peerRef.current.destroy();
+        } catch (e) {
+          // ignore
+        }
+        peerRef.current = null;
       }
 
       // Set a timeout for peer initialization
@@ -209,7 +239,11 @@ export const useChatConnection = () => {
         return;
       }
 
+      let resolved = false;
+
       peer.on('open', (id) => {
+        if (resolved) return;
+        resolved = true;
         clearTimeout(initTimeout);
         console.log('My Peer ID:', id);
         myPeerIdRef.current = id;
@@ -218,15 +252,21 @@ export const useChatConnection = () => {
       });
 
       peer.on('call', (call) => {
-        // BUSY STATE LOGIC:
-        // If we are already connected or connecting to someone else, reject this call.
+        // Only answer if we're searching
+        if (!isSearchingRef.current) {
+          console.log("Not searching, rejecting call from:", call.peer);
+          call.close();
+          return;
+        }
+
+        // BUSY STATE LOGIC: If we are already connected, reject this call.
         if (currentCallRef.current && currentCallRef.current.open) {
           console.log("Busy, rejecting call from:", call.peer);
           call.close();
           return;
         }
 
-        // Only answer if we are actually searching or idle (waiting)
+        // Only answer if we have local stream
         if (localStreamRef.current) {
           console.log("Receiving call from:", call.peer);
 
@@ -237,6 +277,7 @@ export const useChatConnection = () => {
           }
 
           stopMatchmakingSignaling();
+          isSearchingRef.current = false;
           setStatus(ConnectionStatus.CONNECTING);
           call.answer(localStreamRef.current);
           handleCall(call);
@@ -256,7 +297,8 @@ export const useChatConnection = () => {
         console.error('PeerJS error:', err);
 
         // Handle initialization errors
-        if (!peerRef.current || peerRef.current.destroyed) {
+        if (!resolved) {
+          resolved = true;
           clearTimeout(initTimeout);
           reject(new Error(`PeerJS error: ${err.type || 'unknown'}`));
           return;
@@ -265,7 +307,7 @@ export const useChatConnection = () => {
         // Handle runtime errors
         if (err.type === 'peer-unavailable') {
           console.log('Peer unavailable, may have disconnected');
-          handleRemoteDisconnect();
+          // Don't call handleRemoteDisconnect here, wait for the call to close
         } else if (err.type === 'network' || err.type === 'disconnected' || err.type === 'server-error') {
           setError('Network connection lost. Please try again.');
           handleRemoteDisconnect();
@@ -298,78 +340,112 @@ export const useChatConnection = () => {
   // 3. Handle Active Call (Media) - Fixed stale closure issue
   const handleCall = useCallback((call: MediaConnection) => {
     // Cleanup previous call if exists
-    if (currentCallRef.current) {
+    if (currentCallRef.current && currentCallRef.current !== call) {
       currentCallRef.current.close();
     }
     currentCallRef.current = call;
 
-    // Safety timeout: If connection doesn't technically "open" or stream doesn't arrive in time
-    // Using ref to avoid stale closure
-    const streamTimeout = setTimeout(() => {
+    // Clear any existing stream timeout
+    if (streamTimeoutRef.current) {
+      clearTimeout(streamTimeoutRef.current);
+    }
+
+    // Safety timeout: If stream doesn't arrive in time
+    streamTimeoutRef.current = setTimeout(() => {
       if (statusRef.current === ConnectionStatus.CONNECTING) {
         console.log("Stream handshake timed out.");
         call.close();
-        skipToNextInternal();
+        if (isSearchingRef.current || statusRef.current === ConnectionStatus.CONNECTING) {
+          skipToNextInternal();
+        }
       }
     }, STREAM_HANDSHAKE_TIMEOUT);
 
-    call.on('stream', (remoteStream) => {
-      clearTimeout(streamTimeout);
-      setRemoteStream(remoteStream);
+    call.on('stream', (stream) => {
+      console.log("Received remote stream");
+      if (streamTimeoutRef.current) {
+        clearTimeout(streamTimeoutRef.current);
+        streamTimeoutRef.current = null;
+      }
+
+      // Clear connection timeout as well
+      if (connectionTimeoutRef.current) {
+        clearTimeout(connectionTimeoutRef.current);
+        connectionTimeoutRef.current = null;
+      }
+
+      setRemoteStream(stream);
       setStatus(ConnectionStatus.CONNECTED);
       setCallStartTime(Date.now());
-      setIsRemoteAudioEnabled(true); // Reset remote audio mute state on new call
-      setError(null); // Clear any previous errors
+      setIsRemoteAudioEnabled(true);
+      setError(null);
     });
 
     call.on('close', () => {
-      clearTimeout(streamTimeout);
-      handleRemoteDisconnect();
+      console.log("Call closed");
+      if (streamTimeoutRef.current) {
+        clearTimeout(streamTimeoutRef.current);
+        streamTimeoutRef.current = null;
+      }
+      // Only handle disconnect if this was the active call
+      if (currentCallRef.current === call) {
+        handleRemoteDisconnect();
+      }
     });
 
     call.on('error', (e) => {
-      clearTimeout(streamTimeout);
       console.error("Call error", e);
-      setError('Call connection failed. Trying next peer...');
-      handleRemoteDisconnect();
+      if (streamTimeoutRef.current) {
+        clearTimeout(streamTimeoutRef.current);
+        streamTimeoutRef.current = null;
+      }
+      if (currentCallRef.current === call) {
+        setError('Call connection failed.');
+        handleRemoteDisconnect();
+      }
     });
   }, []);
 
-  // Internal skip function without dependency on startSearch (avoids circular dep)
+  // Internal skip function without triggering full startSearch immediately
   const skipToNextInternal = useCallback(() => {
     if (currentCallRef.current) {
       currentCallRef.current.close();
-      setMessages(prev => [...prev, {
-        id: Date.now().toString(),
-        sender: 'system',
-        text: 'Connection failed. Searching for next peer...',
-        timestamp: Date.now()
-      }]);
+      currentCallRef.current = null;
     }
-    // Cleanup and restart will be handled by startSearch
+    if (dataConnRef.current) {
+      dataConnRef.current.close();
+      dataConnRef.current = null;
+    }
+
+    setMessages(prev => [...prev, {
+      id: Date.now().toString(),
+      sender: 'system',
+      text: 'Connection failed. Searching for next peer...',
+      timestamp: Date.now()
+    }]);
+
+    setRemoteStream(null);
+    setLatency(null);
+    setCallStartTime(null);
   }, []);
 
   // 4. Handle Data Connection (Chat & Stats) - Added open check
   const handleDataConnection = useCallback((conn: DataConnection) => {
-    if (dataConnRef.current) {
+    if (dataConnRef.current && dataConnRef.current !== conn) {
       dataConnRef.current.close();
     }
     dataConnRef.current = conn;
 
     conn.on('data', (data: unknown) => {
-      // Type guard for incoming data
       if (!data || typeof data !== 'object') return;
 
       const payload = data as { type?: string; text?: string; timestamp?: number };
 
-      // Chat Messages
       if (payload.type === 'chat' && typeof payload.text === 'string') {
-        // Basic XSS prevention (React handles this, but defense in depth)
-        const sanitizedText = payload.text.slice(0, 1000); // Limit message length
+        const sanitizedText = payload.text.slice(0, 1000);
         addMessage(sanitizedText, 'stranger');
       }
 
-      // Latency Ping/Pong
       if (payload.type === 'ping' && typeof payload.timestamp === 'number') {
         if (conn.open) {
           conn.send({ type: 'pong', timestamp: payload.timestamp });
@@ -377,14 +453,13 @@ export const useChatConnection = () => {
       }
       if (payload.type === 'pong' && typeof payload.timestamp === 'number') {
         const rtt = Date.now() - payload.timestamp;
-        if (rtt >= 0 && rtt < 60000) { // Sanity check
+        if (rtt >= 0 && rtt < 60000) {
           setLatency(rtt);
         }
       }
     });
 
     conn.on('open', () => {
-      // Start Ping Loop
       if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
       pingIntervalRef.current = setInterval(() => {
         if (conn.open) {
@@ -410,6 +485,7 @@ export const useChatConnection = () => {
     setRemoteStream(null);
     setCallStartTime(null);
     setLatency(null);
+
     if (pingIntervalRef.current) {
       clearInterval(pingIntervalRef.current);
       pingIntervalRef.current = null;
@@ -426,20 +502,43 @@ export const useChatConnection = () => {
 
     currentCallRef.current = null;
     dataConnRef.current = null;
+    isSearchingRef.current = false;
 
-    // Stop status is IDLE, user must click Next to find someone else
     setStatus(ConnectionStatus.IDLE);
   }, []);
 
-  // 5. Matchmaking Logic via MQTT - Added error handling and reconnection
+  // Stop MQTT matchmaking
+  const stopMatchmakingSignaling = useCallback(() => {
+    if (heartbeatIntervalRef.current) {
+      clearInterval(heartbeatIntervalRef.current);
+      heartbeatIntervalRef.current = null;
+    }
+    if (mqttClientRef.current) {
+      try {
+        mqttClientRef.current.end(true);
+      } catch (e) {
+        // ignore
+      }
+      mqttClientRef.current = null;
+    }
+  }, []);
+
+  // 5. Matchmaking Logic via MQTT
   const startSearch = useCallback(async () => {
     // Clear any previous errors
     setError(null);
 
     // Cleanup previous state
-    if (currentCallRef.current) currentCallRef.current.close();
-    if (dataConnRef.current) dataConnRef.current.close();
+    if (currentCallRef.current) {
+      currentCallRef.current.close();
+      currentCallRef.current = null;
+    }
+    if (dataConnRef.current) {
+      dataConnRef.current.close();
+      dataConnRef.current = null;
+    }
     clearAllTimers();
+    stopMatchmakingSignaling();
 
     setRemoteStream(null);
     setMessages([]);
@@ -450,8 +549,11 @@ export const useChatConnection = () => {
 
     // Ensure Media
     if (!localStreamRef.current) {
-      const stream = await initLocalStream();
-      if (!stream) return; // Error handled in initLocalStream
+      const stream = await initializeMedia();
+      if (!stream) {
+        setStatus(ConnectionStatus.ERROR);
+        return;
+      }
     }
 
     // Ensure Peer
@@ -466,25 +568,24 @@ export const useChatConnection = () => {
       return;
     }
 
+    isSearchingRef.current = true;
     setStatus(ConnectionStatus.SEARCHING);
 
-    // Connect to MQTT Public Broker
-    if (mqttClientRef.current) {
-      mqttClientRef.current.end(true);
-      mqttClientRef.current = null;
-    }
-
     const connectMQTT = () => {
+      if (!isSearchingRef.current) return;
+
       const client = mqtt.connect(MQTT_BROKER_URL, {
-        reconnectPeriod: 0, // We handle reconnection manually
-        connectTimeout: 10000
+        reconnectPeriod: 0,
+        connectTimeout: 10000,
+        keepalive: 30
       });
       mqttClientRef.current = client;
 
       client.on('connect', () => {
         console.log('Connected to Signaling Broker');
         mqttReconnectAttempts.current = 0;
-        client.subscribe(TOPIC_LOBBY, (err) => {
+
+        client.subscribe(TOPIC_LOBBY, { qos: 0 }, (err) => {
           if (err) {
             console.error('Failed to subscribe to lobby:', err);
             setError('Failed to join matchmaking. Retrying...');
@@ -494,6 +595,7 @@ export const useChatConnection = () => {
         if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
 
         const publishPresence = () => {
+          if (!isSearchingRef.current) return;
           if (myPeerIdRef.current && peerRef.current && !peerRef.current.disconnected) {
             const payload = JSON.stringify({
               peerId: myPeerIdRef.current,
@@ -504,68 +606,69 @@ export const useChatConnection = () => {
         };
 
         publishPresence();
-        heartbeatIntervalRef.current = setInterval(publishPresence, 1200);
+        heartbeatIntervalRef.current = setInterval(publishPresence, 1500);
       });
 
       client.on('error', (err) => {
         console.error('MQTT error:', err);
         mqttReconnectAttempts.current++;
 
-        if (mqttReconnectAttempts.current < MQTT_RECONNECT_ATTEMPTS) {
+        if (mqttReconnectAttempts.current < MQTT_RECONNECT_ATTEMPTS && isSearchingRef.current) {
           console.log(`Retrying MQTT connection (${mqttReconnectAttempts.current}/${MQTT_RECONNECT_ATTEMPTS})...`);
           setTimeout(connectMQTT, 2000);
-        } else {
+        } else if (isSearchingRef.current) {
           setError('Could not connect to matchmaking server. Please try again later.');
           setStatus(ConnectionStatus.ERROR);
+          isSearchingRef.current = false;
         }
       });
 
       client.on('offline', () => {
         console.log('MQTT went offline');
-        if (statusRef.current === ConnectionStatus.SEARCHING) {
-          setError('Lost connection to matchmaking. Reconnecting...');
-        }
       });
 
       client.on('message', (topic, message) => {
-        if (topic === TOPIC_LOBBY) {
-          try {
-            const data = JSON.parse(message.toString());
-            const remotePeerId = data.peerId;
-            const myId = myPeerIdRef.current;
-            const timestamp = data.timestamp;
+        if (!isSearchingRef.current) return;
+        if (topic !== TOPIC_LOBBY) return;
 
-            // Validate data
-            if (!remotePeerId || typeof remotePeerId !== 'string') return;
-            if (!myId || remotePeerId === myId) return;
-            if (typeof timestamp !== 'number') return;
+        try {
+          const data = JSON.parse(message.toString());
+          const remotePeerId = data.peerId;
+          const myId = myPeerIdRef.current;
+          const timestamp = data.timestamp;
 
-            // Ignore stale signals (> 2000ms old) to prevent connecting to ghosts
-            if (Date.now() - timestamp > 2000) return;
+          if (!remotePeerId || typeof remotePeerId !== 'string') return;
+          if (!myId || remotePeerId === myId) return;
+          if (typeof timestamp !== 'number') return;
 
-            // Ignore explicitly ignored IDs (people we just skipped or failed to connect to)
-            if (ignoreRemoteIdsRef.current.has(remotePeerId)) return;
+          // Ignore stale signals (> 3000ms old)
+          if (Date.now() - timestamp > 3000) return;
 
-            // Deterministic Matchmaking: Higher ID calls Lower ID
-            if (myId > remotePeerId) {
-              console.log(`Match found! I (${myId}) am calling (${remotePeerId})`);
-              initiateConnection(remotePeerId);
-            }
-          } catch (e) {
-            // ignore malformed JSON
+          // Ignore explicitly ignored IDs
+          if (ignoreRemoteIdsRef.current.has(remotePeerId)) return;
+
+          // Deterministic Matchmaking: Higher ID calls Lower ID
+          if (myId > remotePeerId) {
+            console.log(`Match found! I (${myId}) am calling (${remotePeerId})`);
+            initiateConnection(remotePeerId);
           }
+        } catch (e) {
+          // ignore malformed JSON
         }
       });
     };
 
     connectMQTT();
 
-  }, [initLocalStream, initPeer, clearAllTimers]);
+  }, [initializeMedia, initPeer, clearAllTimers, stopMatchmakingSignaling]);
 
   const initiateConnection = useCallback((remotePeerId: string) => {
+    if (!isSearchingRef.current) return;
+
     stopMatchmakingSignaling();
+    isSearchingRef.current = false;
     setStatus(ConnectionStatus.CONNECTING);
-    ignoreRemoteIdsRef.current.add(remotePeerId); // Don't try this person again immediately
+    ignoreRemoteIdsRef.current.add(remotePeerId);
 
     if (peerRef.current && localStreamRef.current) {
       try {
@@ -580,12 +683,16 @@ export const useChatConnection = () => {
           handleDataConnection(conn);
         }
 
-        // Fail-safe: If connection stuck in "CONNECTING" for 8s, abort and retry
+        // Fail-safe timeout
         connectionTimeoutRef.current = setTimeout(() => {
-          console.log("Connection attempt timed out. Skipping to next.");
-          if (call) call.close();
-          if (conn) conn.close();
-          skipToNext();
+          if (statusRef.current === ConnectionStatus.CONNECTING) {
+            console.log("Connection attempt timed out. Skipping to next.");
+            if (call) call.close();
+            if (conn) conn.close();
+            currentCallRef.current = null;
+            dataConnRef.current = null;
+            skipToNext();
+          }
         }, CONNECTION_ATTEMPT_TIMEOUT);
 
       } catch (err) {
@@ -594,23 +701,20 @@ export const useChatConnection = () => {
         skipToNext();
       }
     }
-  }, [handleCall, handleDataConnection]);
-
-  const stopMatchmakingSignaling = useCallback(() => {
-    if (heartbeatIntervalRef.current) {
-      clearInterval(heartbeatIntervalRef.current);
-      heartbeatIntervalRef.current = null;
-    }
-    if (mqttClientRef.current) {
-      mqttClientRef.current.end(true);
-      mqttClientRef.current = null;
-    }
-  }, []);
+  }, [handleCall, handleDataConnection, stopMatchmakingSignaling]);
 
   const stopSearch = useCallback(() => {
+    isSearchingRef.current = false;
     stopMatchmakingSignaling();
-    if (currentCallRef.current) currentCallRef.current.close();
-    if (dataConnRef.current) dataConnRef.current.close();
+
+    if (currentCallRef.current) {
+      currentCallRef.current.close();
+      currentCallRef.current = null;
+    }
+    if (dataConnRef.current) {
+      dataConnRef.current.close();
+      dataConnRef.current = null;
+    }
     clearAllTimers();
 
     setStatus(ConnectionStatus.IDLE);
@@ -627,6 +731,7 @@ export const useChatConnection = () => {
   const skipToNext = useCallback(() => {
     if (currentCallRef.current) {
       currentCallRef.current.close();
+      currentCallRef.current = null;
       setMessages(prev => [...prev, {
         id: Date.now().toString(),
         sender: 'system',
@@ -636,37 +741,41 @@ export const useChatConnection = () => {
     }
     if (dataConnRef.current) {
       dataConnRef.current.close();
+      dataConnRef.current = null;
     }
-    // Clear timeout to prevent double-skip
-    if (connectionTimeoutRef.current) {
-      clearTimeout(connectionTimeoutRef.current);
-      connectionTimeoutRef.current = null;
-    }
-    // Small delay to ensure sockets clear
-    setTimeout(() => startSearch(), 150);
-  }, [startSearch]);
 
-  // Rate-limited message sending (max 5 messages per second)
+    clearAllTimers();
+    setRemoteStream(null);
+    setLatency(null);
+    setCallStartTime(null);
+
+    // Small delay then restart search
+    setTimeout(() => {
+      if (statusRef.current !== ConnectionStatus.IDLE) {
+        startSearch();
+      }
+    }, 200);
+  }, [startSearch, clearAllTimers]);
+
+  // Rate-limited message sending
   const lastMessageTime = useRef(0);
   const messageCount = useRef(0);
 
   const sendMessage = useCallback((text: string) => {
     const now = Date.now();
 
-    // Rate limiting: Reset counter every second
     if (now - lastMessageTime.current > 1000) {
       messageCount.current = 0;
       lastMessageTime.current = now;
     }
 
-    // Max 5 messages per second
     if (messageCount.current >= 5) {
       setError('Slow down! Too many messages.');
       return;
     }
 
     if (dataConnRef.current && dataConnRef.current.open && text.trim()) {
-      const sanitizedText = text.trim().slice(0, 1000); // Limit message length
+      const sanitizedText = text.trim().slice(0, 1000);
       const msg: ChatMessage = {
         id: Date.now().toString(),
         sender: 'me',
@@ -694,9 +803,10 @@ export const useChatConnection = () => {
     }]);
   }, []);
 
-  // Cleanup on unmount (Window close)
+  // Cleanup on unmount
   useEffect(() => {
     const handleBeforeUnload = () => {
+      isSearchingRef.current = false;
       stopMatchmakingSignaling();
       if (peerRef.current) peerRef.current.destroy();
     };
@@ -705,6 +815,7 @@ export const useChatConnection = () => {
 
     return () => {
       window.removeEventListener('beforeunload', handleBeforeUnload);
+      isSearchingRef.current = false;
       stopMatchmakingSignaling();
       clearAllTimers();
       if (peerRef.current) peerRef.current.destroy();
@@ -726,6 +837,7 @@ export const useChatConnection = () => {
     isInitializing,
     latency,
     callStartTime,
+    initializeMedia,
     startSearch,
     stopSearch,
     endCall,

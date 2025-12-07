@@ -1,0 +1,73 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+/* Base styles */
+html,
+body {
+  font-family: 'Inter', sans-serif;
+  background-color: #020617;
+  /* Slate 950 */
+  color: #f8fafc;
+  min-height: 100vh;
+  min-height: 100dvh;
+  /* Use dynamic viewport height for mobile */
+}
+
+.font-mono {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* Custom Scrollbar for Chat */
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Video Container Aspect Ratio Fixes */
+.video-mirror {
+  transform: scaleX(-1);
+}
+
+/* Animation utilities */
+@keyframes slide-in-from-top {
+  from {
+    transform: translateX(-50%) translateY(-100%);
+    opacity: 0;
+  }
+
+  to {
+    transform: translateX(-50%) translateY(0);
+    opacity: 1;
+  }
+}
+
+.animate-in {
+  animation-duration: 0.3s;
+  animation-timing-function: ease-out;
+  animation-fill-mode: forwards;
+}
+
+.slide-in-from-top-2 {
+  animation-name: slide-in-from-top;
+}
+
+/* Mobile-first responsive fixes */
+@media (max-height: 700px) {
+  .mobile-compact-header {
+    padding-top: 0.5rem !important;
+    padding-bottom: 0.5rem !important;
+    margin-bottom: 0.25rem !important;
+  }
+
+  .mobile-compact-text h2 {
+    font-size: 1.25rem !important;
+  }
+
+  .mobile-compact-grid {
+    display: none !important;
+  }
+}
