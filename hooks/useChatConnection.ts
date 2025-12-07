@@ -351,60 +351,99 @@ export const useChatConnection = () => {
     }
 
     // Access the underlying RTCPeerConnection for ICE monitoring
-    const peerConnection = (call as any).peerConnection as RTCPeerConnection | undefined;
+    // Note: peerConnection may not be immediately available in PeerJS
+    const setupIceMonitoring = () => {
+      const peerConnection = (call as any).peerConnection as RTCPeerConnection | undefined;
 
-    if (peerConnection && DEBUG_MODE) {
-      console.log('📡 ICE Connection monitoring enabled');
+      if (!peerConnection) {
+        console.log('⏳ Waiting for peer connection...');
+        setTimeout(setupIceMonitoring, 100);
+        return;
+      }
 
-      // Monitor ICE connection state
-      peerConnection.oniceconnectionstatechange = () => {
-        console.log('🔗 ICE Connection State:', peerConnection.iceConnectionState);
+      if (DEBUG_MODE) {
+        console.log('📡 ICE Connection monitoring enabled');
+        console.log('🔌 Initial ICE State:', peerConnection.iceConnectionState);
 
-        if (peerConnection.iceConnectionState === 'failed') {
-          console.error('❌ ICE Connection Failed - TURN server may be required');
-          setError('Connection failed. Trying relay...');
-        }
+        // Monitor ICE connection state
+        peerConnection.oniceconnectionstatechange = () => {
+          const state = peerConnection.iceConnectionState;
+          console.log('🔗 ICE Connection State:', state);
 
-        if (peerConnection.iceConnectionState === 'disconnected') {
-          console.log('⚠️ ICE Disconnected - attempting recovery');
-        }
-
-        if (peerConnection.iceConnectionState === 'connected') {
-          console.log('✅ ICE Connected successfully');
-        }
-      };
-
-      // Monitor ICE gathering state
-      peerConnection.onicegatheringstatechange = () => {
-        console.log('📥 ICE Gathering State:', peerConnection.iceGatheringState);
-      };
-
-      // Monitor ICE candidates
-      peerConnection.onicecandidate = (event) => {
-        if (event.candidate) {
-          const candidateType = event.candidate.type; // 'host', 'srflx', 'relay'
-          console.log(`🎯 ICE Candidate: ${candidateType}`, event.candidate.address || '');
-
-          if (candidateType === 'relay') {
-            console.log('✅ TURN relay candidate found - cross-network should work');
+          if (state === 'failed') {
+            console.error('❌ ICE Connection Failed - media cannot flow');
+            setError('Connection failed. Try refreshing.');
           }
-        }
-      };
 
-      // Monitor signaling state
-      peerConnection.onsignalingstatechange = () => {
-        console.log('📶 Signaling State:', peerConnection.signalingState);
-      };
-    }
+          if (state === 'disconnected') {
+            console.log('⚠️ ICE Disconnected - attempting recovery');
+          }
+
+          if (state === 'connected' || state === 'completed') {
+            console.log('✅ ICE Connected successfully - media should flow');
+
+            // Log the selected candidate pair
+            peerConnection.getStats().then(stats => {
+              stats.forEach(report => {
+                if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+                  console.log('🎯 Selected candidate pair:', {
+                    localType: report.localCandidateId,
+                    remoteType: report.remoteCandidateId,
+                    bytesReceived: report.bytesReceived,
+                    bytesSent: report.bytesSent,
+                  });
+                }
+                if (report.type === 'local-candidate' || report.type === 'remote-candidate') {
+                  if (report.candidateType === 'relay') {
+                    console.log('🔄 Using RELAY candidate:', report.address);
+                  }
+                }
+              });
+            });
+          }
+        };
+
+        // Monitor ICE gathering state
+        peerConnection.onicegatheringstatechange = () => {
+          console.log('📥 ICE Gathering State:', peerConnection.iceGatheringState);
+        };
+
+        // Monitor ICE candidates
+        peerConnection.onicecandidate = (event) => {
+          if (event.candidate) {
+            const candidateType = event.candidate.type;
+            console.log(`🎯 ICE Candidate: ${candidateType}`, event.candidate.address || '');
+
+            if (candidateType === 'relay') {
+              console.log('✅ TURN relay candidate found - cross-network should work');
+            }
+          }
+        };
+
+        // Monitor signaling state
+        peerConnection.onsignalingstatechange = () => {
+          console.log('📶 Signaling State:', peerConnection.signalingState);
+        };
+
+        // Monitor connection state (different from ICE state)
+        peerConnection.onconnectionstatechange = () => {
+          console.log('🌐 Connection State:', peerConnection.connectionState);
+        };
+      }
+    };
+
+    // Start monitoring with a slight delay to ensure peerConnection is ready
+    setTimeout(setupIceMonitoring, 50);
 
     streamTimeoutRef.current = setTimeout(() => {
       if (statusRef.current === ConnectionStatus.CONNECTING) {
         console.log("Stream handshake timed out.");
 
         // Log ICE state on timeout for debugging
-        if (peerConnection && DEBUG_MODE) {
-          console.log('⏰ Timeout ICE State:', peerConnection.iceConnectionState);
-          console.log('⏰ Timeout Gathering State:', peerConnection.iceGatheringState);
+        const pc = (call as any).peerConnection as RTCPeerConnection | undefined;
+        if (pc && DEBUG_MODE) {
+          console.log('⏰ Timeout ICE State:', pc.iceConnectionState);
+          console.log('⏰ Timeout Gathering State:', pc.iceGatheringState);
         }
 
         call.close();
