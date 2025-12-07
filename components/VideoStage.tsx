@@ -86,18 +86,23 @@ const VideoStage: React.FC<VideoStageProps> = ({
   return (
     <div className="relative w-full h-full flex flex-col bg-black overflow-hidden">
 
-      {/* Remote Video (Main Stage) */}
+      {/* Remote Video (Main Stage) - Always render, hide with CSS */}
       <div className="relative flex-1 bg-slate-950 flex items-center justify-center overflow-hidden">
+        {/* Video element is always mounted to prevent unmount during connection */}
+        <video
+          ref={remoteVideoRef}
+          autoPlay
+          playsInline
+          muted={!isRemoteAudioEnabled}
+          className={`w-full h-full object-cover ${status === ConnectionStatus.CONNECTED && remoteStream
+              ? 'opacity-100'
+              : 'opacity-0 absolute'
+            }`}
+        />
+
+        {/* Show overlay content when not connected */}
         {status === ConnectionStatus.CONNECTED && remoteStream ? (
           <>
-            <video
-              ref={remoteVideoRef}
-              autoPlay
-              playsInline
-              muted={!isRemoteAudioEnabled}
-              className="w-full h-full object-cover"
-            />
-
             {/* Connection Stats Overlay */}
             <div className="absolute top-2 left-2 md:top-4 md:left-4 flex gap-1.5 md:gap-2">
               <div className="bg-slate-900/60 backdrop-blur-sm px-2 py-1 md:px-3 md:py-1.5 rounded-full flex items-center gap-1.5 border border-white/5">
