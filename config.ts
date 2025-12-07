@@ -1,7 +1,8 @@
 /**
  * NexusP2P Configuration
  * 
- * Customize these settings based on your needs.
+ * TURN credentials are fetched dynamically from /api/turn-credentials
+ * Set your Cloudflare credentials in Vercel Environment Variables
  */
 
 // =============================================================================
@@ -15,64 +16,51 @@ export const MQTT_CONFIG = {
 };
 
 // =============================================================================
-// WEBRTC / ICE CONFIGURATION
+// FALLBACK ICE CONFIG (used before API response)
 // =============================================================================
-// Fresh TURN credentials from Metered free tier
-// Get your own at: https://www.metered.ca/tools/openrelay/
-export const ICE_CONFIG = {
+export const FALLBACK_ICE_CONFIG = {
     iceServers: [
-        // === STUN SERVERS ===
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
         { urls: 'stun:stun2.l.google.com:19302' },
-
-        // === TURN SERVERS (Metered Free) ===
-        // These are public free TURN servers - may be rate limited
-        {
-            urls: 'turn:a.relay.metered.ca:80',
-            username: 'e13b9bfeda7b8ce41de7b8e5',
-            credential: 'SWKdtuV0SkALW9YW',
-        },
-        {
-            urls: 'turn:a.relay.metered.ca:80?transport=tcp',
-            username: 'e13b9bfeda7b8ce41de7b8e5',
-            credential: 'SWKdtuV0SkALW9YW',
-        },
-        {
-            urls: 'turn:a.relay.metered.ca:443',
-            username: 'e13b9bfeda7b8ce41de7b8e5',
-            credential: 'SWKdtuV0SkALW9YW',
-        },
-        {
-            urls: 'turns:a.relay.metered.ca:443?transport=tcp',
-            username: 'e13b9bfeda7b8ce41de7b8e5',
-            credential: 'SWKdtuV0SkALW9YW',
-        },
-
-        // Backup TURN - ExpressTurn free
-        {
-            urls: 'turn:relay1.expressturn.com:3478',
-            username: 'efQGH8HCIOGJN4YDLI',
-            credential: 'tWqXgVxhF8xyBJRf',
-        },
     ],
-
-    // IMPORTANT: Change to 'relay' to force TURN usage for testing
-    // 'all' = Try P2P first, fallback to relay
-    // 'relay' = FORCE relay only (slower but works across networks)
     iceTransportPolicy: 'all' as const,
-
     bundlePolicy: 'max-bundle' as const,
     rtcpMuxPolicy: 'require' as const,
     iceCandidatePoolSize: 10,
 };
 
 // =============================================================================
+// FETCH DYNAMIC ICE CONFIG (with Cloudflare TURN)
+// =============================================================================
+export async function getIceConfig(): Promise<RTCConfiguration> {
+    try {
+        const response = await fetch('/api/turn-credentials');
+        if (!response.ok) throw new Error('Failed to fetch TURN credentials');
+
+        const data = await response.json();
+
+        console.log('✅ Fetched TURN credentials:', data.iceServers?.length || 0, 'servers');
+
+        return {
+            iceServers: data.iceServers,
+            iceTransportPolicy: 'all',
+            bundlePolicy: 'max-bundle',
+            rtcpMuxPolicy: 'require',
+            iceCandidatePoolSize: 10,
+        };
+    } catch (error) {
+        console.warn('⚠️ Could not fetch TURN credentials, using fallback:', error);
+        return FALLBACK_ICE_CONFIG;
+    }
+}
+
+// =============================================================================
 // PEERJS CONFIGURATION
 // =============================================================================
 export const PEER_CONFIG = {
-    config: ICE_CONFIG,
-    debug: 2, // Enable warnings for debugging
+    config: FALLBACK_ICE_CONFIG, // Initial config, updated dynamically
+    debug: 2,
 };
 
 // =============================================================================

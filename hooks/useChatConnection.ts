@@ -4,11 +4,12 @@ import mqtt from 'mqtt';
 import { ConnectionStatus, ChatMessage } from '../types';
 import {
   MQTT_CONFIG,
-  PEER_CONFIG,
   TIMEOUT_CONFIG,
   MEDIA_CONFIG,
   CHAT_CONFIG,
-  DEBUG_MODE
+  DEBUG_MODE,
+  getIceConfig,
+  FALLBACK_ICE_CONFIG
 } from '../config';
 
 // Destructure config values
@@ -207,9 +208,9 @@ export const useChatConnection = () => {
     }
   }, []);
 
-  // Initialize PeerJS
-  const initPeer = useCallback(() => {
-    return new Promise<string>((resolve, reject) => {
+  // Initialize PeerJS with dynamic TURN credentials
+  const initPeer = useCallback(async () => {
+    return new Promise<string>(async (resolve, reject) => {
       if (peerRef.current && !peerRef.current.destroyed && peerRef.current.id) {
         resolve(peerRef.current.id);
         return;
@@ -226,10 +227,25 @@ export const useChatConnection = () => {
         reject(new Error('Connection timed out. Check your network.'));
       }, PEER_INIT_TIMEOUT);
 
+      // Fetch dynamic TURN credentials
+      let iceConfig;
+      try {
+        iceConfig = await getIceConfig();
+        console.log('🔐 Using dynamic TURN credentials');
+      } catch (e) {
+        console.warn('⚠️ Using fallback ICE config');
+        iceConfig = FALLBACK_ICE_CONFIG;
+      }
+
+      const peerConfig = {
+        config: iceConfig,
+        debug: DEBUG_MODE ? 2 : 0,
+      };
+
       let peer: Peer;
 
       try {
-        peer = new Peer(PEER_CONFIG);
+        peer = new Peer(peerConfig);
       } catch (err) {
         clearTimeout(initTimeout);
         reject(new Error('Failed to create connection'));
