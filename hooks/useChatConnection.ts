@@ -2,31 +2,17 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import Peer, { MediaConnection, DataConnection } from 'peerjs';
 import mqtt from 'mqtt';
 import { ConnectionStatus, ChatMessage } from '../types';
+import {
+  MQTT_CONFIG,
+  PEER_CONFIG,
+  TIMEOUT_CONFIG,
+  MEDIA_CONFIG,
+  CHAT_CONFIG
+} from '../config';
 
-// Use a public reliable broker with WSS support
-const MQTT_BROKER_URL = 'wss://broker.hivemq.com:8884/mqtt';
-const TOPIC_LOBBY = 'nexusp2p-global-lobby-v5';
-
-// Connection timeouts (in ms)
-const PEER_INIT_TIMEOUT = 20000;
-const STREAM_HANDSHAKE_TIMEOUT = 20000;
-const CONNECTION_ATTEMPT_TIMEOUT = 12000;
-const MQTT_RECONNECT_ATTEMPTS = 3;
-
-// Free public STUN servers are essential for P2P connections to work 
-// across different networks (NAT traversal).
-const PEER_CONFIG = {
-  config: {
-    iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun2.l.google.com:19302' },
-      { urls: 'stun:stun3.l.google.com:19302' },
-      { urls: 'stun:stun4.l.google.com:19302' },
-    ]
-  },
-  debug: 0 // Set to 2 or 3 for verbose debugging logs
-};
+// Destructure config values
+const { brokerUrl: MQTT_BROKER_URL, lobbyTopic: TOPIC_LOBBY, reconnectAttempts: MQTT_RECONNECT_ATTEMPTS } = MQTT_CONFIG;
+const { peerInit: PEER_INIT_TIMEOUT, streamHandshake: STREAM_HANDSHAKE_TIMEOUT, connectionAttempt: CONNECTION_ATTEMPT_TIMEOUT } = TIMEOUT_CONFIG;
 
 // Browser compatibility check
 const checkBrowserSupport = (): { supported: boolean; error?: string } => {
@@ -47,7 +33,7 @@ export const useChatConnection = () => {
   const [error, setError] = useState<string | null>(null);
   const [isInitializing, setIsInitializing] = useState(false);
 
-  // Media States - now start with camera/mic ON by default
+  // Media States
   const [isVideoEnabled, setIsVideoEnabled] = useState(true);
   const [isAudioEnabled, setIsAudioEnabled] = useState(true);
   const [isRemoteAudioEnabled, setIsRemoteAudioEnabled] = useState(true);
@@ -71,8 +57,9 @@ export const useChatConnection = () => {
   const statusRef = useRef<ConnectionStatus>(ConnectionStatus.IDLE);
   const mqttReconnectAttempts = useRef(0);
   const isSearchingRef = useRef(false);
+  const autoReconnectRef = useRef(true); // Track if we should auto-reconnect on disconnect
 
-  // Track desired video/audio state for when we have to re-apply it
+  // Track desired video/audio state
   const desiredVideoEnabledRef = useRef(true);
   const desiredAudioEnabledRef = useRef(true);
 
@@ -109,13 +96,12 @@ export const useChatConnection = () => {
     }
   }, []);
 
-  // Initialize media WITHOUT starting search - allows user to preview/adjust before searching
+  // Initialize media WITHOUT starting search
   const initializeMedia = useCallback(async () => {
     if (localStreamRef.current) {
       return localStreamRef.current;
     }
 
-    // Check browser support first
     const browserCheck = checkBrowserSupport();
     if (!browserCheck.supported) {
       setError(browserCheck.error || 'Browser not supported');
@@ -126,22 +112,13 @@ export const useChatConnection = () => {
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 1280, max: 1920 },
-          height: { ideal: 720, max: 1080 },
-          facingMode: 'user'
-        },
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        }
+        video: MEDIA_CONFIG.video,
+        audio: MEDIA_CONFIG.audio
       });
 
       setLocalStream(stream);
       localStreamRef.current = stream;
 
-      // Apply desired media states
       stream.getVideoTracks().forEach((track) => {
         track.enabled = desiredVideoEnabledRef.current;
       });
@@ -161,13 +138,11 @@ export const useChatConnection = () => {
 
       if (err instanceof Error) {
         if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-          errorMessage = "Camera/microphone permission denied. Please allow access and try again.";
+          errorMessage = "Camera/microphone permission denied. Please allow access.";
         } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
-          errorMessage = "No camera or microphone found. Please connect a device.";
+          errorMessage = "No camera or microphone found.";
         } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
-          errorMessage = "Camera/microphone is already in use by another application.";
-        } else if (err.name === 'OverconstrainedError') {
-          errorMessage = "Camera does not meet the required specifications.";
+          errorMessage = "Camera/microphone is in use by another app.";
         }
       }
 
@@ -178,7 +153,6 @@ export const useChatConnection = () => {
     }
   }, []);
 
-  // Toggle video - can be used before or during a call
   const toggleVideo = useCallback(() => {
     desiredVideoEnabledRef.current = !desiredVideoEnabledRef.current;
     setIsVideoEnabled(desiredVideoEnabledRef.current);
@@ -190,7 +164,6 @@ export const useChatConnection = () => {
     }
   }, []);
 
-  // Toggle audio - can be used before or during a call
   const toggleAudio = useCallback(() => {
     desiredAudioEnabledRef.current = !desiredAudioEnabledRef.current;
     setIsAudioEnabled(desiredAudioEnabledRef.current);
@@ -206,7 +179,34 @@ export const useChatConnection = () => {
     setIsRemoteAudioEnabled((prev) => !prev);
   }, []);
 
-  // 2. Initialize PeerJS with proper error handling and timeout
+  // Stop MQTT matchmaking
+  const stopMatchmakingSignaling = useCallback(() => {
+    if (heartbeatIntervalRef.current) {
+      clearInterval(heartbeatIntervalRef.current);
+      heartbeatIntervalRef.current = null;
+    }
+    if (mqttClientRef.current) {
+      try {
+        mqttClientRef.current.end(true);
+      } catch (e) {
+        // ignore
+      }
+      mqttClientRef.current = null;
+    }
+  }, []);
+
+  // Send a signal to remote peer (skip, disconnect, etc.)
+  const sendSignal = useCallback((signalType: 'skip' | 'disconnect' | 'end') => {
+    if (dataConnRef.current && dataConnRef.current.open) {
+      try {
+        dataConnRef.current.send({ type: 'signal', signal: signalType });
+      } catch (e) {
+        console.log('Failed to send signal:', e);
+      }
+    }
+  }, []);
+
+  // Initialize PeerJS
   const initPeer = useCallback(() => {
     return new Promise<string>((resolve, reject) => {
       if (peerRef.current && !peerRef.current.destroyed && peerRef.current.id) {
@@ -214,19 +214,15 @@ export const useChatConnection = () => {
         return;
       }
 
-      // Cleanup any existing peer
       if (peerRef.current) {
         try {
           peerRef.current.destroy();
-        } catch (e) {
-          // ignore
-        }
+        } catch (e) { }
         peerRef.current = null;
       }
 
-      // Set a timeout for peer initialization
       const initTimeout = setTimeout(() => {
-        reject(new Error('PeerJS initialization timed out. Please check your network connection.'));
+        reject(new Error('Connection timed out. Check your network.'));
       }, PEER_INIT_TIMEOUT);
 
       let peer: Peer;
@@ -235,7 +231,7 @@ export const useChatConnection = () => {
         peer = new Peer(PEER_CONFIG);
       } catch (err) {
         clearTimeout(initTimeout);
-        reject(new Error('Failed to create PeerJS instance'));
+        reject(new Error('Failed to create connection'));
         return;
       }
 
@@ -252,25 +248,21 @@ export const useChatConnection = () => {
       });
 
       peer.on('call', (call) => {
-        // Only answer if we're searching
         if (!isSearchingRef.current) {
           console.log("Not searching, rejecting call from:", call.peer);
           call.close();
           return;
         }
 
-        // BUSY STATE LOGIC: If we are already connected, reject this call.
         if (currentCallRef.current && currentCallRef.current.open) {
           console.log("Busy, rejecting call from:", call.peer);
           call.close();
           return;
         }
 
-        // Only answer if we have local stream
         if (localStreamRef.current) {
           console.log("Receiving call from:", call.peer);
 
-          // Clear timeouts since we are now establishing a connection
           if (connectionTimeoutRef.current) {
             clearTimeout(connectionTimeoutRef.current);
             connectionTimeoutRef.current = null;
@@ -296,67 +288,57 @@ export const useChatConnection = () => {
       peer.on('error', (err) => {
         console.error('PeerJS error:', err);
 
-        // Handle initialization errors
         if (!resolved) {
           resolved = true;
           clearTimeout(initTimeout);
-          reject(new Error(`PeerJS error: ${err.type || 'unknown'}`));
+          reject(new Error(`Connection error: ${err.type || 'unknown'}`));
           return;
         }
 
-        // Handle runtime errors
         if (err.type === 'peer-unavailable') {
-          console.log('Peer unavailable, may have disconnected');
-          // Don't call handleRemoteDisconnect here, wait for the call to close
+          console.log('Peer unavailable');
         } else if (err.type === 'network' || err.type === 'disconnected' || err.type === 'server-error') {
-          setError('Network connection lost. Please try again.');
-          handleRemoteDisconnect();
-        } else if (err.type === 'browser-incompatible') {
-          setError('Your browser is not fully compatible with WebRTC.');
-          setStatus(ConnectionStatus.ERROR);
+          setError('Network connection lost.');
+          handleRemoteDisconnect(true); // Auto reconnect
         }
       });
 
       peer.on('disconnected', () => {
-        // Try to reconnect to PeerServer if strictly disconnected
         if (peerRef.current && !peerRef.current.destroyed) {
-          console.log('Attempting to reconnect to PeerServer...');
+          console.log('Reconnecting to server...');
           try {
             peerRef.current.reconnect();
           } catch (e) {
-            console.error('Failed to reconnect:', e);
+            console.error('Reconnect failed:', e);
           }
         }
       });
 
       peer.on('close', () => {
-        console.log('Peer connection closed');
+        console.log('Peer closed');
         peerRef.current = null;
         myPeerIdRef.current = null;
       });
     });
-  }, []);
+  }, [stopMatchmakingSignaling]);
 
-  // 3. Handle Active Call (Media) - Fixed stale closure issue
+  // Handle Active Call (Media)
   const handleCall = useCallback((call: MediaConnection) => {
-    // Cleanup previous call if exists
     if (currentCallRef.current && currentCallRef.current !== call) {
       currentCallRef.current.close();
     }
     currentCallRef.current = call;
 
-    // Clear any existing stream timeout
     if (streamTimeoutRef.current) {
       clearTimeout(streamTimeoutRef.current);
     }
 
-    // Safety timeout: If stream doesn't arrive in time
     streamTimeoutRef.current = setTimeout(() => {
       if (statusRef.current === ConnectionStatus.CONNECTING) {
         console.log("Stream handshake timed out.");
         call.close();
         if (isSearchingRef.current || statusRef.current === ConnectionStatus.CONNECTING) {
-          skipToNextInternal();
+          handleRemoteDisconnect(true);
         }
       }
     }, STREAM_HANDSHAKE_TIMEOUT);
@@ -368,7 +350,6 @@ export const useChatConnection = () => {
         streamTimeoutRef.current = null;
       }
 
-      // Clear connection timeout as well
       if (connectionTimeoutRef.current) {
         clearTimeout(connectionTimeoutRef.current);
         connectionTimeoutRef.current = null;
@@ -379,6 +360,7 @@ export const useChatConnection = () => {
       setCallStartTime(Date.now());
       setIsRemoteAudioEnabled(true);
       setError(null);
+      autoReconnectRef.current = true; // Enable auto-reconnect when connected
     });
 
     call.on('close', () => {
@@ -387,9 +369,9 @@ export const useChatConnection = () => {
         clearTimeout(streamTimeoutRef.current);
         streamTimeoutRef.current = null;
       }
-      // Only handle disconnect if this was the active call
       if (currentCallRef.current === call) {
-        handleRemoteDisconnect();
+        // Auto-reconnect when call closes (unless we manually stopped)
+        handleRemoteDisconnect(autoReconnectRef.current);
       }
     });
 
@@ -400,36 +382,13 @@ export const useChatConnection = () => {
         streamTimeoutRef.current = null;
       }
       if (currentCallRef.current === call) {
-        setError('Call connection failed.');
-        handleRemoteDisconnect();
+        setError('Call failed.');
+        handleRemoteDisconnect(true);
       }
     });
   }, []);
 
-  // Internal skip function without triggering full startSearch immediately
-  const skipToNextInternal = useCallback(() => {
-    if (currentCallRef.current) {
-      currentCallRef.current.close();
-      currentCallRef.current = null;
-    }
-    if (dataConnRef.current) {
-      dataConnRef.current.close();
-      dataConnRef.current = null;
-    }
-
-    setMessages(prev => [...prev, {
-      id: Date.now().toString(),
-      sender: 'system',
-      text: 'Connection failed. Searching for next peer...',
-      timestamp: Date.now()
-    }]);
-
-    setRemoteStream(null);
-    setLatency(null);
-    setCallStartTime(null);
-  }, []);
-
-  // 4. Handle Data Connection (Chat & Stats) - Added open check
+  // Handle Data Connection (Chat & Stats & Signals)
   const handleDataConnection = useCallback((conn: DataConnection) => {
     if (dataConnRef.current && dataConnRef.current !== conn) {
       dataConnRef.current.close();
@@ -439,13 +398,44 @@ export const useChatConnection = () => {
     conn.on('data', (data: unknown) => {
       if (!data || typeof data !== 'object') return;
 
-      const payload = data as { type?: string; text?: string; timestamp?: number };
+      const payload = data as { type?: string; text?: string; timestamp?: number; signal?: string };
 
+      // Handle signals from remote peer
+      if (payload.type === 'signal') {
+        if (payload.signal === 'skip' || payload.signal === 'disconnect') {
+          // Remote peer skipped or disconnected - auto search for next
+          console.log('Remote peer signaled:', payload.signal);
+          setMessages(prev => [...prev, {
+            id: Date.now().toString(),
+            sender: 'system',
+            text: payload.signal === 'skip' ? 'Stranger skipped. Finding next...' : 'Stranger disconnected. Finding next...',
+            timestamp: Date.now()
+          }]);
+          // Force reconnect
+          handleRemoteDisconnect(true);
+          return;
+        }
+        if (payload.signal === 'end') {
+          // Remote peer ended the call - go to idle
+          console.log('Remote peer ended call');
+          setMessages(prev => [...prev, {
+            id: Date.now().toString(),
+            sender: 'system',
+            text: 'Stranger ended the call.',
+            timestamp: Date.now()
+          }]);
+          handleRemoteDisconnect(false);
+          return;
+        }
+      }
+
+      // Chat Messages
       if (payload.type === 'chat' && typeof payload.text === 'string') {
         const sanitizedText = payload.text.slice(0, 1000);
         addMessage(sanitizedText, 'stranger');
       }
 
+      // Latency Ping/Pong
       if (payload.type === 'ping' && typeof payload.timestamp === 'number') {
         if (conn.open) {
           conn.send({ type: 'pong', timestamp: payload.timestamp });
@@ -481,7 +471,20 @@ export const useChatConnection = () => {
     });
   }, []);
 
-  const handleRemoteDisconnect = useCallback(() => {
+  // Handle remote disconnect - with option to auto-reconnect
+  const handleRemoteDisconnect = useCallback((shouldAutoReconnect: boolean = false) => {
+    console.log('handleRemoteDisconnect, autoReconnect:', shouldAutoReconnect);
+
+    // Clean up current connection
+    if (currentCallRef.current) {
+      currentCallRef.current.close();
+      currentCallRef.current = null;
+    }
+    if (dataConnRef.current) {
+      dataConnRef.current.close();
+      dataConnRef.current = null;
+    }
+
     setRemoteStream(null);
     setCallStartTime(null);
     setLatency(null);
@@ -491,84 +494,32 @@ export const useChatConnection = () => {
       pingIntervalRef.current = null;
     }
 
-    if (statusRef.current === ConnectionStatus.CONNECTED) {
-      setMessages((prev) => [...prev, {
-        id: Date.now().toString(),
-        sender: 'system',
-        text: 'Stranger disconnected.',
-        timestamp: Date.now()
-      }]);
-    }
-
-    currentCallRef.current = null;
-    dataConnRef.current = null;
-    isSearchingRef.current = false;
-
-    setStatus(ConnectionStatus.IDLE);
-  }, []);
-
-  // Stop MQTT matchmaking
-  const stopMatchmakingSignaling = useCallback(() => {
-    if (heartbeatIntervalRef.current) {
-      clearInterval(heartbeatIntervalRef.current);
-      heartbeatIntervalRef.current = null;
-    }
-    if (mqttClientRef.current) {
-      try {
-        mqttClientRef.current.end(true);
-      } catch (e) {
-        // ignore
-      }
-      mqttClientRef.current = null;
-    }
-  }, []);
-
-  // 5. Matchmaking Logic via MQTT
-  const startSearch = useCallback(async () => {
-    // Clear any previous errors
-    setError(null);
-
-    // Cleanup previous state
-    if (currentCallRef.current) {
-      currentCallRef.current.close();
-      currentCallRef.current = null;
-    }
-    if (dataConnRef.current) {
-      dataConnRef.current.close();
-      dataConnRef.current = null;
-    }
     clearAllTimers();
-    stopMatchmakingSignaling();
 
-    setRemoteStream(null);
-    setMessages([]);
-    setCallStartTime(null);
-    setLatency(null);
+    if (shouldAutoReconnect && localStreamRef.current) {
+      // Auto-reconnect: go directly to searching
+      console.log('Auto-reconnecting...');
+      setStatus(ConnectionStatus.SEARCHING);
+      // Small delay then start search
+      setTimeout(() => {
+        startSearchInternal();
+      }, 300);
+    } else {
+      // Go to idle
+      isSearchingRef.current = false;
+      setStatus(ConnectionStatus.IDLE);
+    }
+  }, [clearAllTimers]);
+
+  // Internal search function (used for auto-reconnect)
+  const startSearchInternal = useCallback(() => {
+    if (!localStreamRef.current) return;
+    if (!peerRef.current || peerRef.current.destroyed || !myPeerIdRef.current) return;
+
     ignoreRemoteIdsRef.current.clear();
     mqttReconnectAttempts.current = 0;
-
-    // Ensure Media
-    if (!localStreamRef.current) {
-      const stream = await initializeMedia();
-      if (!stream) {
-        setStatus(ConnectionStatus.ERROR);
-        return;
-      }
-    }
-
-    // Ensure Peer
-    try {
-      if (!peerRef.current || peerRef.current.destroyed || !myPeerIdRef.current) {
-        await initPeer();
-      }
-    } catch (err) {
-      console.error('Failed to initialize peer:', err);
-      setError(err instanceof Error ? err.message : 'Failed to initialize connection');
-      setStatus(ConnectionStatus.ERROR);
-      return;
-    }
-
     isSearchingRef.current = true;
+    autoReconnectRef.current = true;
     setStatus(ConnectionStatus.SEARCHING);
 
     const connectMQTT = () => {
@@ -587,8 +538,7 @@ export const useChatConnection = () => {
 
         client.subscribe(TOPIC_LOBBY, { qos: 0 }, (err) => {
           if (err) {
-            console.error('Failed to subscribe to lobby:', err);
-            setError('Failed to join matchmaking. Retrying...');
+            console.error('Subscribe failed:', err);
           }
         });
 
@@ -614,17 +564,12 @@ export const useChatConnection = () => {
         mqttReconnectAttempts.current++;
 
         if (mqttReconnectAttempts.current < MQTT_RECONNECT_ATTEMPTS && isSearchingRef.current) {
-          console.log(`Retrying MQTT connection (${mqttReconnectAttempts.current}/${MQTT_RECONNECT_ATTEMPTS})...`);
           setTimeout(connectMQTT, 2000);
         } else if (isSearchingRef.current) {
-          setError('Could not connect to matchmaking server. Please try again later.');
+          setError('Matchmaking failed. Try again.');
           setStatus(ConnectionStatus.ERROR);
           isSearchingRef.current = false;
         }
-      });
-
-      client.on('offline', () => {
-        console.log('MQTT went offline');
       });
 
       client.on('message', (topic, message) => {
@@ -640,27 +585,62 @@ export const useChatConnection = () => {
           if (!remotePeerId || typeof remotePeerId !== 'string') return;
           if (!myId || remotePeerId === myId) return;
           if (typeof timestamp !== 'number') return;
-
-          // Ignore stale signals (> 3000ms old)
           if (Date.now() - timestamp > 3000) return;
-
-          // Ignore explicitly ignored IDs
           if (ignoreRemoteIdsRef.current.has(remotePeerId)) return;
 
-          // Deterministic Matchmaking: Higher ID calls Lower ID
           if (myId > remotePeerId) {
-            console.log(`Match found! I (${myId}) am calling (${remotePeerId})`);
+            console.log(`Match found! Calling ${remotePeerId}`);
             initiateConnection(remotePeerId);
           }
-        } catch (e) {
-          // ignore malformed JSON
-        }
+        } catch (e) { }
       });
     };
 
     connectMQTT();
+  }, []);
 
-  }, [initializeMedia, initPeer, clearAllTimers, stopMatchmakingSignaling]);
+  // Main startSearch (called from UI)
+  const startSearch = useCallback(async () => {
+    setError(null);
+
+    if (currentCallRef.current) {
+      currentCallRef.current.close();
+      currentCallRef.current = null;
+    }
+    if (dataConnRef.current) {
+      dataConnRef.current.close();
+      dataConnRef.current = null;
+    }
+    clearAllTimers();
+    stopMatchmakingSignaling();
+
+    setRemoteStream(null);
+    setMessages([]);
+    setCallStartTime(null);
+    setLatency(null);
+
+    if (!localStreamRef.current) {
+      const stream = await initializeMedia();
+      if (!stream) {
+        setStatus(ConnectionStatus.ERROR);
+        return;
+      }
+    }
+
+    try {
+      if (!peerRef.current || peerRef.current.destroyed || !myPeerIdRef.current) {
+        await initPeer();
+      }
+    } catch (err) {
+      console.error('Peer init failed:', err);
+      setError(err instanceof Error ? err.message : 'Connection failed');
+      setStatus(ConnectionStatus.ERROR);
+      return;
+    }
+
+    startSearchInternal();
+
+  }, [initializeMedia, initPeer, clearAllTimers, stopMatchmakingSignaling, startSearchInternal]);
 
   const initiateConnection = useCallback((remotePeerId: string) => {
     if (!isSearchingRef.current) return;
@@ -674,7 +654,7 @@ export const useChatConnection = () => {
       try {
         const call = peerRef.current.call(remotePeerId, localStreamRef.current);
         if (!call) {
-          throw new Error('Failed to create call');
+          throw new Error('Call failed');
         }
         handleCall(call);
 
@@ -683,27 +663,28 @@ export const useChatConnection = () => {
           handleDataConnection(conn);
         }
 
-        // Fail-safe timeout
         connectionTimeoutRef.current = setTimeout(() => {
           if (statusRef.current === ConnectionStatus.CONNECTING) {
-            console.log("Connection attempt timed out. Skipping to next.");
+            console.log("Connection timed out");
             if (call) call.close();
             if (conn) conn.close();
             currentCallRef.current = null;
             dataConnRef.current = null;
-            skipToNext();
+            handleRemoteDisconnect(true); // Auto retry
           }
         }, CONNECTION_ATTEMPT_TIMEOUT);
 
       } catch (err) {
-        console.error("Failed to initiate connection", err);
-        setError('Failed to connect to peer. Trying next...');
-        skipToNext();
+        console.error("Connection failed:", err);
+        setError('Connection failed. Retrying...');
+        handleRemoteDisconnect(true);
       }
     }
-  }, [handleCall, handleDataConnection, stopMatchmakingSignaling]);
+  }, [handleCall, handleDataConnection, stopMatchmakingSignaling, handleRemoteDisconnect]);
 
+  // Stop search completely (go to idle, no auto-reconnect)
   const stopSearch = useCallback(() => {
+    autoReconnectRef.current = false;
     isSearchingRef.current = false;
     stopMatchmakingSignaling();
 
@@ -724,20 +705,34 @@ export const useChatConnection = () => {
     setError(null);
   }, [stopMatchmakingSignaling, clearAllTimers]);
 
+  // End call - notify remote, then go to idle
   const endCall = useCallback(() => {
-    stopSearch();
-  }, [stopSearch]);
+    // Send end signal to remote before disconnecting
+    sendSignal('end');
+    autoReconnectRef.current = false;
 
+    // Small delay to ensure signal is sent
+    setTimeout(() => {
+      stopSearch();
+    }, 100);
+  }, [stopSearch, sendSignal]);
+
+  // Skip to next - notify remote (they will also search), then search for new peer
   const skipToNext = useCallback(() => {
+    // Send skip signal to remote - they will also start searching
+    sendSignal('skip');
+
+    setMessages(prev => [...prev, {
+      id: Date.now().toString(),
+      sender: 'system',
+      text: 'Skipped. Finding next...',
+      timestamp: Date.now()
+    }]);
+
+    // Close current connections
     if (currentCallRef.current) {
       currentCallRef.current.close();
       currentCallRef.current = null;
-      setMessages(prev => [...prev, {
-        id: Date.now().toString(),
-        sender: 'system',
-        text: 'Skipped to next person.',
-        timestamp: Date.now()
-      }]);
     }
     if (dataConnRef.current) {
       dataConnRef.current.close();
@@ -749,13 +744,11 @@ export const useChatConnection = () => {
     setLatency(null);
     setCallStartTime(null);
 
-    // Small delay then restart search
+    // Start searching for next peer
     setTimeout(() => {
-      if (statusRef.current !== ConnectionStatus.IDLE) {
-        startSearch();
-      }
+      startSearchInternal();
     }, 200);
-  }, [startSearch, clearAllTimers]);
+  }, [clearAllTimers, startSearchInternal, sendSignal]);
 
   // Rate-limited message sending
   const lastMessageTime = useRef(0);
@@ -770,7 +763,7 @@ export const useChatConnection = () => {
     }
 
     if (messageCount.current >= 5) {
-      setError('Slow down! Too many messages.');
+      setError('Too many messages!');
       return;
     }
 
@@ -788,8 +781,7 @@ export const useChatConnection = () => {
         dataConnRef.current.send({ type: 'chat', text: sanitizedText });
         messageCount.current++;
       } catch (err) {
-        console.error('Failed to send message:', err);
-        setError('Failed to send message. Connection may be lost.');
+        setError('Message failed.');
       }
     }
   }, []);
@@ -806,6 +798,7 @@ export const useChatConnection = () => {
   // Cleanup on unmount
   useEffect(() => {
     const handleBeforeUnload = () => {
+      sendSignal('disconnect');
       isSearchingRef.current = false;
       stopMatchmakingSignaling();
       if (peerRef.current) peerRef.current.destroy();
@@ -815,6 +808,7 @@ export const useChatConnection = () => {
 
     return () => {
       window.removeEventListener('beforeunload', handleBeforeUnload);
+      sendSignal('disconnect');
       isSearchingRef.current = false;
       stopMatchmakingSignaling();
       clearAllTimers();
@@ -823,7 +817,7 @@ export const useChatConnection = () => {
         localStreamRef.current.getTracks().forEach(track => track.stop());
       }
     };
-  }, [stopMatchmakingSignaling, clearAllTimers]);
+  }, [stopMatchmakingSignaling, clearAllTimers, sendSignal]);
 
   return {
     status,

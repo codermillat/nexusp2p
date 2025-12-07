@@ -1,11 +1,11 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useChatConnection } from './hooks/useChatConnection';
 import VideoStage from './components/VideoStage';
 import ChatBox from './components/ChatBox';
 import Button from './components/Button';
 import ErrorBoundary from './components/ErrorBoundary';
 import { ConnectionStatus } from './types';
-import { Video, VideoOff, Mic, MicOff, Network, AlertCircle, SkipForward, Square, Info, Volume2, VolumeX, PhoneOff, Loader2, X, Camera } from 'lucide-react';
+import { Video, VideoOff, Mic, MicOff, Network, AlertCircle, SkipForward, Square, Info, Volume2, VolumeX, PhoneOff, Loader2, X, Camera, MessageCircle } from 'lucide-react';
 
 const AppContent: React.FC = () => {
   const {
@@ -31,13 +31,28 @@ const AppContent: React.FC = () => {
     error
   } = useChatConnection();
 
-  const [errorVisible, setErrorVisible] = React.useState(false);
+  const [errorVisible, setErrorVisible] = useState(false);
+  const [isMobileChatOpen, setIsMobileChatOpen] = useState(false);
 
   React.useEffect(() => {
     if (error) {
       setErrorVisible(true);
     }
   }, [error]);
+
+  // Count unread messages when chat is closed
+  const [lastSeenCount, setLastSeenCount] = useState(0);
+  const unreadCount = isMobileChatOpen ? 0 : messages.length - lastSeenCount;
+
+  const openMobileChat = () => {
+    setIsMobileChatOpen(true);
+    setLastSeenCount(messages.length);
+  };
+
+  const closeMobileChat = () => {
+    setIsMobileChatOpen(false);
+    setLastSeenCount(messages.length);
+  };
 
   const dismissError = () => {
     setErrorVisible(false);
@@ -91,29 +106,45 @@ const AppContent: React.FC = () => {
           </div>
         </div>
 
-        <div className={`flex items-center gap-1.5 px-2 py-1 md:px-3 md:py-1.5 rounded-full border text-[10px] md:text-xs font-mono ${status === ConnectionStatus.CONNECTED ? 'bg-emerald-500/5 border-emerald-500/20 text-emerald-400' :
+        <div className="flex items-center gap-2">
+          {/* Mobile Chat Button */}
+          <button
+            onClick={openMobileChat}
+            className="md:hidden relative w-9 h-9 flex items-center justify-center rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 ring-1 ring-white/10 transition-all"
+            aria-label="Open chat"
+          >
+            <MessageCircle className="w-4 h-4" />
+            {unreadCount > 0 && (
+              <span className="absolute -top-1 -right-1 w-4 h-4 bg-indigo-500 text-white text-[9px] font-bold rounded-full flex items-center justify-center">
+                {unreadCount > 9 ? '9+' : unreadCount}
+              </span>
+            )}
+          </button>
+
+          <div className={`flex items-center gap-1.5 px-2 py-1 md:px-3 md:py-1.5 rounded-full border text-[10px] md:text-xs font-mono ${status === ConnectionStatus.CONNECTED ? 'bg-emerald-500/5 border-emerald-500/20 text-emerald-400' :
             status === ConnectionStatus.SEARCHING ? 'bg-amber-500/5 border-amber-500/20 text-amber-400' :
               status === ConnectionStatus.CONNECTING ? 'bg-blue-500/5 border-blue-500/20 text-blue-400' :
                 status === ConnectionStatus.ERROR ? 'bg-red-500/5 border-red-500/20 text-red-400' :
                   'bg-slate-800 border-white/5 text-slate-400'
-          }`}>
-          <div className={`w-1.5 h-1.5 rounded-full ${status === ConnectionStatus.CONNECTED ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]' :
+            }`}>
+            <div className={`w-1.5 h-1.5 rounded-full ${status === ConnectionStatus.CONNECTED ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]' :
               status === ConnectionStatus.SEARCHING ? 'bg-amber-500 animate-pulse' :
                 status === ConnectionStatus.CONNECTING ? 'bg-blue-500 animate-pulse' :
                   status === ConnectionStatus.ERROR ? 'bg-red-500' :
                     'bg-slate-600'
-            }`} />
-          <span className="uppercase">{status}</span>
+              }`} />
+            <span className="uppercase">{status}</span>
+          </div>
         </div>
       </header>
 
-      {/* Main Content - Flex grow to fill available space */}
+      {/* Main Content */}
       <main className="flex-1 flex flex-col md:flex-row gap-2 md:gap-4 px-2 md:px-6 min-h-0 overflow-hidden">
 
-        {/* Video Area - Takes remaining vertical space on mobile */}
+        {/* Video Area */}
         <div className="flex-1 flex flex-col min-h-0 bg-slate-900/40 border border-white/5 rounded-2xl md:rounded-3xl overflow-hidden">
 
-          {/* Video Stage - Flexible height */}
+          {/* Video Stage */}
           <div className="flex-1 relative min-h-0 overflow-hidden">
             <VideoStage
               localStream={localStream}
@@ -152,7 +183,7 @@ const AppContent: React.FC = () => {
             )}
           </div>
 
-          {/* Action Bar - Fixed height, always visible */}
+          {/* Action Bar */}
           <div className="shrink-0 p-2 md:p-3 bg-slate-900/50 border-t border-white/5">
 
             {/* Compact Disclaimer for Idle */}
@@ -168,7 +199,6 @@ const AppContent: React.FC = () => {
             <div className="flex justify-center items-center gap-2 md:gap-4">
               {/* Media Controls */}
               <div className="flex gap-1.5 md:gap-2">
-                {/* Preview Camera - Only when no stream */}
                 {!hasLocalStream && isIdle && (
                   <button
                     onClick={handlePreviewCamera}
@@ -184,8 +214,8 @@ const AppContent: React.FC = () => {
                 <button
                   onClick={toggleVideo}
                   className={`w-9 h-9 md:w-11 md:h-11 flex items-center justify-center rounded-xl transition-all ${isVideoEnabled
-                      ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 ring-1 ring-white/10'
-                      : 'bg-red-500/10 hover:bg-red-500/20 text-red-400 ring-1 ring-red-500/20'
+                    ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 ring-1 ring-white/10'
+                    : 'bg-red-500/10 hover:bg-red-500/20 text-red-400 ring-1 ring-red-500/20'
                     }`}
                   title={isVideoEnabled ? "Disable Camera" : "Enable Camera"}
                   aria-label={isVideoEnabled ? "Disable Camera" : "Enable Camera"}
@@ -196,8 +226,8 @@ const AppContent: React.FC = () => {
                 <button
                   onClick={toggleAudio}
                   className={`w-9 h-9 md:w-11 md:h-11 flex items-center justify-center rounded-xl transition-all ${isAudioEnabled
-                      ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 ring-1 ring-white/10'
-                      : 'bg-red-500/10 hover:bg-red-500/20 text-red-400 ring-1 ring-red-500/20'
+                    ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 ring-1 ring-white/10'
+                    : 'bg-red-500/10 hover:bg-red-500/20 text-red-400 ring-1 ring-red-500/20'
                     }`}
                   title={isAudioEnabled ? "Mute Mic" : "Unmute Mic"}
                   aria-label={isAudioEnabled ? "Mute Mic" : "Unmute Mic"}
@@ -209,8 +239,8 @@ const AppContent: React.FC = () => {
                   <button
                     onClick={toggleRemoteAudio}
                     className={`w-9 h-9 md:w-11 md:h-11 flex items-center justify-center rounded-xl transition-all ${isRemoteAudioEnabled
-                        ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 ring-1 ring-white/10'
-                        : 'bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 ring-1 ring-amber-500/20'
+                      ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 ring-1 ring-white/10'
+                      : 'bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 ring-1 ring-amber-500/20'
                       }`}
                     title={isRemoteAudioEnabled ? "Mute Remote" : "Unmute Remote"}
                     aria-label={isRemoteAudioEnabled ? "Mute Remote" : "Unmute Remote"}
@@ -251,8 +281,8 @@ const AppContent: React.FC = () => {
                   onClick={handleMainAction}
                   disabled={isInitializing}
                   className={`px-4 md:px-6 font-semibold text-sm md:text-base ${isConnected
-                      ? 'bg-indigo-600 hover:bg-indigo-500 text-white'
-                      : 'bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white border border-indigo-400/30'
+                    ? 'bg-indigo-600 hover:bg-indigo-500 text-white'
+                    : 'bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white border border-indigo-400/30'
                     }`}
                 >
                   {isInitializing && <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />}
@@ -282,10 +312,46 @@ const AppContent: React.FC = () => {
 
       {/* Minimal Footer - Desktop only */}
       <footer className="hidden md:block py-2 text-center shrink-0">
-        <p className="text-slate-600 text-xs">
-          NexusP2P &copy; {new Date().getFullYear()} &middot; Serverless &middot; Encrypted
-        </p>
+        <div className="flex justify-center items-center gap-4 text-xs">
+          <span className="text-slate-600">NexusP2P © {new Date().getFullYear()}</span>
+          <span className="text-slate-700">·</span>
+          <a href="/privacy" className="text-slate-500 hover:text-slate-300 transition-colors">Privacy</a>
+          <a href="/terms" className="text-slate-500 hover:text-slate-300 transition-colors">Terms</a>
+          <a href="/about" className="text-slate-500 hover:text-slate-300 transition-colors">About</a>
+        </div>
       </footer>
+
+      {/* Mobile Chat Overlay */}
+      {isMobileChatOpen && (
+        <div className="md:hidden fixed inset-0 z-50 flex flex-col bg-slate-950/95 backdrop-blur-lg">
+          {/* Mobile Chat Header */}
+          <div className="flex items-center justify-between p-3 border-b border-white/10 shrink-0">
+            <div className="flex items-center gap-2">
+              <MessageCircle className="w-5 h-5 text-indigo-400" />
+              <h2 className="text-lg font-semibold text-white">Chat</h2>
+              {status === ConnectionStatus.CONNECTED && (
+                <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 text-[10px] font-mono">Live</span>
+              )}
+            </div>
+            <button
+              onClick={closeMobileChat}
+              className="w-9 h-9 flex items-center justify-center rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 ring-1 ring-white/10"
+              aria-label="Close chat"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+
+          {/* Chat Content */}
+          <div className="flex-1 min-h-0">
+            <ChatBox
+              messages={messages}
+              onSendMessage={sendMessage}
+              status={status}
+            />
+          </div>
+        </div>
+      )}
 
       {/* Background Effects */}
       <div className="fixed top-0 left-0 w-full h-full overflow-hidden -z-10 pointer-events-none">
