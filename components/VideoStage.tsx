@@ -30,12 +30,30 @@ const VideoStage: React.FC<VideoStageProps> = ({
   useEffect(() => {
     if (localVideoRef.current && localStream) {
       localVideoRef.current.srcObject = localStream;
+      localVideoRef.current.play().catch(e => console.log('Local video play error:', e));
     }
   }, [localStream]);
 
   useEffect(() => {
     if (remoteVideoRef.current && remoteStream) {
+      // Debug: Log stream track info
+      const videoTracks = remoteStream.getVideoTracks();
+      const audioTracks = remoteStream.getAudioTracks();
+      console.log('🎥 Remote stream tracks:', {
+        video: videoTracks.length,
+        audio: audioTracks.length,
+        videoEnabled: videoTracks[0]?.enabled,
+        videoMuted: videoTracks[0]?.muted,
+        videoReadyState: videoTracks[0]?.readyState,
+      });
+
       remoteVideoRef.current.srcObject = remoteStream;
+
+      // Explicitly try to play (handles autoplay policy)
+      remoteVideoRef.current.play().catch(e => {
+        console.warn('⚠️ Remote video autoplay blocked:', e);
+        // Try playing on user interaction
+      });
     }
   }, [remoteStream]);
 

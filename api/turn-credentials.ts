@@ -15,31 +15,44 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const CLOUDFLARE_TURN_KEY_ID = process.env.CLOUDFLARE_TURN_KEY_ID;
     const CLOUDFLARE_TURN_API_TOKEN = process.env.CLOUDFLARE_TURN_API_TOKEN;
 
+    // Fallback TURN credentials (set these in Vercel env vars if needed)
+    const FALLBACK_TURN_URL = process.env.FALLBACK_TURN_URL;
+    const FALLBACK_TURN_USERNAME = process.env.FALLBACK_TURN_USERNAME;
+    const FALLBACK_TURN_CREDENTIAL = process.env.FALLBACK_TURN_CREDENTIAL;
+
+    // Default STUN-only config (always works for same-network)
+    const stunOnlyConfig = {
+        iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun2.l.google.com:19302' },
+            { urls: 'stun:stun.cloudflare.com:3478' },
+        ],
+        source: 'stun-only'
+    };
+
+    // If no Cloudflare configured, try fallback TURN
     if (!CLOUDFLARE_ACCOUNT_ID || !CLOUDFLARE_TURN_KEY_ID || !CLOUDFLARE_TURN_API_TOKEN) {
-        // If Cloudflare isn't configured, return fallback free TURN servers
-        console.log('Cloudflare TURN not configured, using fallback');
-        return res.status(200).json({
-            iceServers: [
-                { urls: 'stun:stun.l.google.com:19302' },
-                { urls: 'stun:stun1.l.google.com:19302' },
-                {
-                    urls: 'turn:a.relay.metered.ca:80',
-                    username: 'e13b9bfeda7b8ce41de7b8e5',
-                    credential: 'SWKdtuV0SkALW9YW',
-                },
-                {
-                    urls: 'turn:a.relay.metered.ca:443',
-                    username: 'e13b9bfeda7b8ce41de7b8e5',
-                    credential: 'SWKdtuV0SkALW9YW',
-                },
-                {
-                    urls: 'turn:a.relay.metered.ca:443?transport=tcp',
-                    username: 'e13b9bfeda7b8ce41de7b8e5',
-                    credential: 'SWKdtuV0SkALW9YW',
-                },
-            ],
-            source: 'fallback'
-        });
+        console.log('Cloudflare TURN not configured');
+
+        // Use fallback TURN if configured
+        if (FALLBACK_TURN_URL && FALLBACK_TURN_USERNAME && FALLBACK_TURN_CREDENTIAL) {
+            return res.status(200).json({
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' },
+                    {
+                        urls: FALLBACK_TURN_URL,
+                        username: FALLBACK_TURN_USERNAME,
+                        credential: FALLBACK_TURN_CREDENTIAL,
+                    },
+                ],
+                source: 'fallback'
+            });
+        }
+
+        // No TURN configured - STUN only
+        return res.status(200).json(stunOnlyConfig);
     }
 
     try {
@@ -66,7 +79,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
         const data = await response.json();
 
-        // Return ICE servers configuration
+        // Return ICE servers configuration with Cloudflare TURN
         return res.status(200).json({
             iceServers: [
                 // STUN servers (free, unlimited)
@@ -96,23 +109,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     } catch (error) {
         console.error('Error generating TURN credentials:', error);
 
-        // Fallback to free TURN servers on error
+        // Fallback to STUN only on error
         return res.status(200).json({
-            iceServers: [
-                { urls: 'stun:stun.l.google.com:19302' },
-                {
-                    urls: 'turn:a.relay.metered.ca:80',
-                    username: 'e13b9bfeda7b8ce41de7b8e5',
-                    credential: 'SWKdtuV0SkALW9YW',
-                },
-                {
-                    urls: 'turn:a.relay.metered.ca:443',
-                    username: 'e13b9bfeda7b8ce41de7b8e5',
-                    credential: 'SWKdtuV0SkALW9YW',
-                },
-            ],
-            source: 'fallback',
-            error: 'Using fallback TURN servers'
+            ...stunOnlyConfig,
+            error: 'TURN generation failed, using STUN only'
         });
     }
 }
